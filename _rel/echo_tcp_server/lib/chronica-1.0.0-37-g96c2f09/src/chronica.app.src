@@ -1,0 +1,19 @@
+{application, chronica, [
+    {description,"Log Library"},
+    {id, "chronica"},
+    {modules, []},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        sasl,
+        compiler,
+        syntax_tools,
+        pt_lib,
+        pt_scripts
+    ]},
+    {versioned_dependencies, []},
+    {mod, {chronica_app, []}},
+    {env, []},
+    {vsn, git}
+]}.

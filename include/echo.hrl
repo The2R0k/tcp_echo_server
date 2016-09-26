@@ -1,0 +1,2 @@
+-define(PORT, 4444).
+-define(CLIENT_TIMEOUT, 600000).

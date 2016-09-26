@@ -1,0 +1,250 @@
+#!/usr/bin/env escript
+%% -*- erlang -*-
+%%! -nocookie -hidden -kernel error_logger silent -sasl sasl_error_logger false
+
+-module('nodectl').
+-export([
+         main/1,
+         merge/2
+        ]).
+
+-mode(compile).
+
+main(["merge", Rel, BinDir, GlobalCfg, NodeCfg, SysCfg, MergedCfg]) ->
+    %% Load GlocalConfig
+    RootDir = filename:join(lists:reverse(erlang:tl(lists:reverse(filename:split(BinDir))))),
+    {ok, [GCfg]} = file:consult(GlobalCfg),
+
+    %% Load NodeConfig
+    {ok, [NCfg]} = file:consult(NodeCfg),
+    {ok, [SCfg]} = file:consult(SysCfg),
+
+    Fun = fun({S,GD} = C, A) ->
+            case lists:keyfind(S, 1, A) of
+                false ->
+                    [C | A];
+                {S, ND} ->
+                %Search S_cfg_merge module
+                    {ok, MergeFun} = get_merge_fun(Rel, RootDir, S),
+                    case MergeFun(GD, ND) of
+                        {ok, MD} ->
+                            lists:keystore(S, 1, A, {S, MD});
+                        {error, Error} ->
+                            io:format("Error on merge ~p. Reason:~p~n", [S, Error]),
+                            A
+                    end
+            end
+        end,
+
+    Res1 = lists:foldl(Fun, NCfg, GCfg),
+    Res = lists:foldl(Fun, Res1, SCfg),
+    case filelib:ensure_dir(MergedCfg) of
+        ok ->
+            ok;
+        E ->
+            io:format("Can't create file ~p. Reason: ~p~n", [MergedCfg, E]),
+            halt(2)
+    end,
+    Ret = case file:open(MergedCfg, [write]) of
+        {ok, Fd} ->
+            try io:fwrite(Fd, "~p.", [Res]) of
+                ok -> 0
+            catch
+                _:Error ->
+                    io:format("~p~n", [Error]),
+                    2
+            after
+                file:close(Fd)
+            end;
+        {error, Error} ->
+                io:format("~p~n", [Error]),
+                2
+    end,
+    halt(Ret);
+
+%Return values:
+% 0 - ok
+% 1 - node not running
+% 2 - error
+main([Command, NodeType, Node, Cookie]) ->
+    Code =
+        try
+            case net_kernel:start([get_node_name(Command, Node), get_node_type(NodeType)]) of
+                {ok, _} ->
+                    ok;
+                {error, ErrorReason} ->
+                    %epmd not running?
+                    case check_epmd() of
+                        false ->
+                            erlang:halt(1); %epmd not running
+                        true ->
+                            io:format("Error on start monitor node: ~p~n", [ErrorReason]),
+                            erlang:halt(2) %Error
+                    end
+            end,
+            erlang:set_cookie(erlang:node(), string_to_atom(Cookie)),
+            run_command(string_to_atom(Command), string_to_atom(Node))
+        catch
+            _:Error ->
+                io:format("~p~n", [Error]),
+                2
+        end,
+    erlang:halt(Code);
+
+main(_) ->
+  io:format("Usage: ~s stop|status name|sname NodeName Cookie~n", [?MODULE]),
+  erlang:halt(2).
+
+get_remote_node(Node) ->
+    [_,Host] = string:tokens(erlang:atom_to_list(erlang:node()), "@"),
+    case re:run(lists:concat([Node]), "@") of
+        {match, _Match} -> Node;
+        _ -> string_to_atom(lists:flatten(io_lib:format("~s@~s", [Node, Host])))
+    end.
+
+run_command(status, Node) ->
+    RemoteNode = get_remote_node(Node),
+    case net_adm:ping(RemoteNode) of
+        pong -> 0;
+        pang -> 1
+    end;
+run_command(Command, Node) ->
+    RemoteNode = get_remote_node(Node),
+    {Module, Cmd} = command_spec(Command),
+    io:format("Send [~w] to ~s ... ", [Command, RemoteNode]),
+    case internal_run_command(RemoteNode, Module, Cmd, []) of
+       ok ->
+          io:format("ok~n", []),
+          0;
+       {badrpc, nodedown} ->
+          io:format("Node: ~s with cookie: ~s is not started~n",
+                    [RemoteNode, erlang:get_cookie()]),
+          1;
+       Error ->
+          io:format("Node: ~s with cookie: ~s Error: ~p~n",
+                    [RemoteNode, erlang:get_cookie(), Error]),
+          2
+    end.
+
+
+internal_run_command(RemoteNode, Module, Command, Args)->
+    rpc:call(RemoteNode, Module, Command, Args).
+
+get_node_name(Type, Node) ->
+    string_to_atom(lists:flatten(Type ++ Node)).
+
+get_node_type("name") ->
+    longnames;
+get_node_type("sname") ->
+    shortnames.
+
+string_to_atom(String) when erlang:is_atom(String) ->
+    String;
+string_to_atom(String) when erlang:is_list(String) ->
+    case catch(erlang:list_to_existing_atom(String)) of
+        {'EXIT', _} ->
+            erlang:list_to_atom(String);
+        V ->
+            V
+    end;
+string_to_atom(_) ->
+    throw("Invalid input string").
+
+command_spec(stop)->
+    {init, stop};
+command_spec(terminate) ->
+    {erlang, halt};
+command_spec(Command) ->
+    throw({unsupported, Command}).
+
+get_release_version(Rel, RootDir) ->
+    BinDir = filename:join([RootDir, "bin", Rel]),
+     case file:read_file(BinDir) of
+         {ok, B} ->
+             Fun = fun([$R,$E,$L,$_,$V,$S,$N,$=|Version])->
+                           throw({version, Version});
+                      (_E) ->
+                           ok
+                   end,
+             try
+                 ListData = string:tokens(erlang:binary_to_list(B), "\n"),
+                 lists:foreach(Fun, ListData),
+                 {error, version_not_found}
+             catch
+                 throw:{version, V} ->
+                     {ok, V};
+                 _:Error ->
+                     {error, Error}
+             end;
+         E ->
+             E
+     end.
+
+get_merge_fun(Rel, RootDir, App) ->
+    case get_release_version(Rel, RootDir) of
+        {ok, RelVer} ->
+            RelPath = filename:join(
+                        [RootDir,
+                         "releases",
+                         string:join([Rel, RelVer], "-"),
+                         Rel ++ ".rel"]),
+            case file:consult(RelPath) of
+                {ok, [{release, _, _, Apps}]} ->
+                    case lists:keyfind(App, 1, Apps) of
+                        false ->
+                            {error, {application_not_found, App}};
+                        T ->
+                            AppVer = erlang:element(2, T),
+                            AppStr = erlang:atom_to_list(App),
+                            AppPath = filename:join([RootDir,
+                                                     "lib",
+                                                     string:join([AppStr, AppVer], "-"),
+                                                     "ebin"]),
+                            case filelib:is_dir(AppPath) of
+                                true ->
+                                    code:add_path(AppPath),
+                                    case code:load_file(
+                                           erlang:list_to_atom(
+                                             lists:flatten(
+                                               io_lib:format("~p_cfg_merge", [App])))) of
+                                        {module, Mod} ->
+                                            {ok, fun(_A, _B) -> Mod:merge(_A, _B) end};
+                                        {error, _} ->
+                                            {ok, fun ?MODULE:merge/2}
+                                    end;
+                                _ ->
+                                    {ok, fun ?MODULE:merge/2}
+                            end
+                    end;
+                _ ->
+                    {ok, fun ?MODULE:merge/2}
+            end;
+        _ErrVer ->
+            {ok, fun ?MODULE:merge/2}
+    end.
+
+
+merge(Global, Node) ->
+    try
+        {ok, lists:foldr(fun(A,B) -> merge_(A,B) end, Node, Global)}
+    catch
+        _:Error -> {error, Error}
+    end.
+
+merge_({Key, Value}, Config) ->
+    case lists:keyfind(Key, 1, Config) of
+        false ->
+            [{Key, Value}|Config];
+        {_, _Value2} ->
+            Config
+    end.
+
+
+check_epmd() ->
+    try erlang:list_to_integer(os:cmd("pgrep epmd")) of
+        _V ->
+            true
+    catch
+        _:_ ->
+            false
+    end.

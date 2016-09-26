@@ -1,4 +1,8 @@
-all:	clean up rebar relx run_console_mod
+all:	up.rebarlx clean up rebar relx run_console_mod
+
+up.rebarlx:
+	chmod +x ./rebar
+	chmod +x ./relx
 
 up:
 	./rebar get-deps

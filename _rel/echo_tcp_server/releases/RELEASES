@@ -1,0 +1,11 @@
+[{release,"echo_tcp_server","vsn","7.3.1.2",
+          [{pt_lib,"8fa2eeb","./lib/pt_lib-8fa2eeb"},
+           {compiler,"6.0.3","./lib/compiler-6.0.3"},
+           {syntax_tools,"1.7","./lib/syntax_tools-1.7"},
+           {stdlib,"2.8","./lib/stdlib-2.8"},
+           {kernel,"4.2","./lib/kernel-4.2"},
+           {pt_scripts,"0314468","./lib/pt_scripts-0314468"},
+           {sasl,"2.7","./lib/sasl-2.7"},
+           {chronica,"1.0.0-37-g96c2f09","./lib/chronica-1.0.0-37-g96c2f09"},
+           {echo,"1","./lib/echo-1"}],
+          permanent}].
