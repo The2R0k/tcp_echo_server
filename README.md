@@ -2,4 +2,4 @@
 
 Used port: 4444
 
-Run command $make
+Run command "make"
